@@ -46,6 +46,15 @@ struct board {
   board_set_amp_enabled set_amp_enabled;
 };
 
+// True when this boot came from a real power-on (POR); false on a software
+// reset (e.g. a stop-mode wake on bus activity). Set from RCC->RSR in
+// cuatro_init. Bootkicking the SOM on every stop-mode wake cold-boots it on
+// each of the car's parked background wakes; on Rivian that periodic 12V
+// load step trips the parked-security "phantom alarm" (voltage-deviation
+// detection). Boards without a SOM never read this; default keeps stock
+// behavior.
+bool bootkick_on_power_on = true;
+
 // ******************* Definitions ********************
 // These should match the enums in cereal/log.capnp and __init__.py
 #define HW_TYPE_UNKNOWN 0U

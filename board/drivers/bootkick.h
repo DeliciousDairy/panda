@@ -9,8 +9,20 @@ void bootkick_tick(bool ignition, bool recent_heartbeat) {
   static uint8_t bootkick_harness_status_prev = HARNESS_STATUS_NC;
   static bool bootkick_ign_prev = false;
   static BootState boot_state = BOOT_BOOTKICK;
+  static bool boot_state_initialized = false;
+
+  // After a software reset (stop-mode wake), start in standby: the SOM must
+  // not be cold-booted by the car's parked background wakes. It still boots
+  // on an ignition rising edge below.
+  if (!boot_state_initialized) {
+    boot_state = bootkick_on_power_on ? BOOT_BOOTKICK : BOOT_STANDBY;
+    boot_state_initialized = true;
+  }
+
   BootState boot_state_prev = boot_state;
-  const bool harness_inserted = (harness.status != bootkick_harness_status_prev) && (harness.status != HARNESS_STATUS_NC);
+  // The reset also re-inits harness state, so a stop-mode wake looks like a
+  // fresh harness insertion; only honor insertions in a power-on session.
+  const bool harness_inserted = (harness.status != bootkick_harness_status_prev) && (harness.status != HARNESS_STATUS_NC) && bootkick_on_power_on;
 
   if ((ignition && !bootkick_ign_prev) || harness_inserted) {
     // bootkick on rising edge of ignition or harness insertion
