@@ -224,7 +224,7 @@ int comms_control_handler(ControlPacket_t *req, uint8_t *resp) {
     // **** 0xd9: read bootkick diagnostic backup registers
     case 0xd9: {
       RCC->APB4ENR |= RCC_APB4ENR_RTCAPBEN;
-      uint32_t diag[7] = {RTC->BKP0R, RTC->BKP1R, RTC->BKP2R, RTC->BKP3R, RTC->BKP4R, RTC->BKP5R, RTC->BKP6R};
+      uint32_t diag[8] = {RTC->BKP0R, RTC->BKP1R, RTC->BKP2R, RTC->BKP3R, RTC->BKP4R, RTC->BKP5R, RTC->BKP6R, RTC->BKP7R};
       (void)memcpy(resp, (uint8_t *)diag, sizeof(diag));
       resp_len = sizeof(diag);
       break;

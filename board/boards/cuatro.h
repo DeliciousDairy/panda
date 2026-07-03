@@ -80,11 +80,24 @@ static void cuatro_init(void) {
   // car's parked background wakes cold-boots it (Rivian phantom alarm).
   // Reset-cause flags are sticky across resets, so clear them after reading.
   uint32_t rsr_snapshot = RCC->RSR;
-  bootkick_on_power_on = (rsr_snapshot & RCC_RSR_PORRSTF) != 0U;
+  bool power_on_reset = (rsr_snapshot & RCC_RSR_PORRSTF) != 0U;
   // direct write: RMVF is a self-clearing command bit, so the monitored
   // register_set_bits() wrapper would flag a permanent divergence
   RCC->RSR |= RCC_RSR_RMVF;
+  // PORRSTF alone can't tell a replug from a brown-out: 12V dips (e.g. the
+  // car's DC-DC activity while parked) reset the MCU with the same flags,
+  // and each false "power-on" kick cold-boots the SOM. The backup domain is
+  // the discriminator: it drains only when power is truly removed, so magic
+  // intact across a POR means a brief dip — leave the SOM alone. A real
+  // replug (backup domain cold) still bootkicks.
+  RCC->APB4ENR |= RCC_APB4ENR_RTCAPBEN;
+  PWR->CR1 |= PWR_CR1_DBP;
+  bool backup_domain_cold = (RTC->BKP0R != BOOTKICK_DIAG_MAGIC);
+  bootkick_on_power_on = power_on_reset && backup_domain_cold;
   bootkick_diag_init(rsr_snapshot, bootkick_on_power_on);
+  if (power_on_reset && !backup_domain_cold) {
+    RTC->BKP7R += 1U;  // suppressed-dip counter, read back via 0xd9
+  }
   cuatro_set_bootkick(bootkick_on_power_on ? BOOT_BOOTKICK : BOOT_STANDBY);
 
   // SOM debugging UART

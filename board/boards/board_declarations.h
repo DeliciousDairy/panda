@@ -93,6 +93,7 @@ static void bootkick_diag_init(uint32_t rsr_raw, bool power_on) {
     RTC->BKP4R = 0U;
     RTC->BKP5R = 0U;
     RTC->BKP6R = 0U;
+    RTC->BKP7R = 0U;  // suppressed-dip counter
   }
   RTC->BKP1R += 1U;
   RTC->BKP2R = rsr_raw;
