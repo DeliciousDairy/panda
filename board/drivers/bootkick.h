@@ -27,6 +27,7 @@ void bootkick_tick(bool ignition, bool recent_heartbeat) {
   if ((ignition && !bootkick_ign_prev) || harness_inserted) {
     // bootkick on rising edge of ignition or harness insertion
     boot_state = BOOT_BOOTKICK;
+    bootkick_diag_record(harness_inserted ? 2U : 1U);
   } else if (recent_heartbeat) {
     // disable bootkick once openpilot is up
     boot_state = BOOT_STANDBY;

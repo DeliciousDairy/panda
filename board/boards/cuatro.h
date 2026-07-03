@@ -79,10 +79,12 @@ static void cuatro_init(void) {
   // on bus activity) must leave the SOM off: otherwise every one of the
   // car's parked background wakes cold-boots it (Rivian phantom alarm).
   // Reset-cause flags are sticky across resets, so clear them after reading.
-  bootkick_on_power_on = (RCC->RSR & RCC_RSR_PORRSTF) != 0U;
+  uint32_t rsr_snapshot = RCC->RSR;
+  bootkick_on_power_on = (rsr_snapshot & RCC_RSR_PORRSTF) != 0U;
   // direct write: RMVF is a self-clearing command bit, so the monitored
   // register_set_bits() wrapper would flag a permanent divergence
   RCC->RSR |= RCC_RSR_RMVF;
+  bootkick_diag_init(rsr_snapshot, bootkick_on_power_on);
   cuatro_set_bootkick(bootkick_on_power_on ? BOOT_BOOTKICK : BOOT_STANDBY);
 
   // SOM debugging UART

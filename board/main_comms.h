@@ -221,6 +221,14 @@ int comms_control_handler(ControlPacket_t *req, uint8_t *resp) {
     case 0xd8:
       NVIC_SystemReset();
       break;
+    // **** 0xd9: read bootkick diagnostic backup registers
+    case 0xd9: {
+      RCC->APB4ENR |= RCC_APB4ENR_RTCAPBEN;
+      uint32_t diag[7] = {RTC->BKP0R, RTC->BKP1R, RTC->BKP2R, RTC->BKP3R, RTC->BKP4R, RTC->BKP5R, RTC->BKP6R};
+      (void)memcpy(resp, (uint8_t *)diag, sizeof(diag));
+      resp_len = sizeof(diag);
+      break;
+    }
     // **** 0xdb: set OBD CAN multiplexing mode
     case 0xdb:
       current_board->set_can_mode((req->param1 == 1U) ? CAN_MODE_OBD_CAN2 : CAN_MODE_NORMAL);

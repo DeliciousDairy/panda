@@ -55,6 +55,56 @@ struct board {
 // behavior.
 bool bootkick_on_power_on = true;
 
+// Bootkick diagnostics: persist kick evidence in TAMP backup registers, which
+// survive software/pin resets (including openpilot's startup panda reset) and
+// are cleared only by backup-domain power loss. Read back via control 0xd9.
+//   BKP0R magic, BKP1R boot count, BKP2R RSR at this boot (pre-RMVF),
+//   BKP3R last kick reason (1=ignition edge, 2=harness insertion, 3=power-on),
+//   BKP4R kick count, BKP5R uptime_cnt at last kick, BKP6R RSR of kick session.
+#define BOOTKICK_DIAG_MAGIC 0xB007D1A6U
+#ifndef BOOTSTUB
+extern uint32_t uptime_cnt;
+#endif
+static void bootkick_diag_record(uint32_t reason) {
+#ifdef STM32H7
+  // self-enable: also reachable on boards that never ran bootkick_diag_init
+  RCC->APB4ENR |= RCC_APB4ENR_RTCAPBEN;
+  PWR->CR1 |= PWR_CR1_DBP;
+  RTC->BKP3R = reason;
+  RTC->BKP4R += 1U;
+#ifdef BOOTSTUB
+  RTC->BKP5R = 0U;  // no uptime counter in the bootstub
+#else
+  RTC->BKP5R = uptime_cnt;
+#endif
+  RTC->BKP6R = RTC->BKP2R;
+#else
+  (void)reason;  // no backup domain in simulation builds
+#endif
+}
+static void bootkick_diag_init(uint32_t rsr_raw, bool power_on) {
+#ifdef STM32H7
+  RCC->APB4ENR |= RCC_APB4ENR_RTCAPBEN;
+  PWR->CR1 |= PWR_CR1_DBP;
+  if (RTC->BKP0R != BOOTKICK_DIAG_MAGIC) {
+    RTC->BKP0R = BOOTKICK_DIAG_MAGIC;
+    RTC->BKP1R = 0U;
+    RTC->BKP3R = 0U;
+    RTC->BKP4R = 0U;
+    RTC->BKP5R = 0U;
+    RTC->BKP6R = 0U;
+  }
+  RTC->BKP1R += 1U;
+  RTC->BKP2R = rsr_raw;
+  if (power_on) {
+    bootkick_diag_record(3U);
+  }
+#else
+  (void)rsr_raw;
+  (void)power_on;
+#endif
+}
+
 // ******************* Definitions ********************
 // These should match the enums in cereal/log.capnp and __init__.py
 #define HW_TYPE_UNKNOWN 0U
