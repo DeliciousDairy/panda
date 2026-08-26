@@ -82,7 +82,7 @@ class SpiDevice:
   Provides locked, thread-safe access to a panda's SPI interface.
   """
 
-  MAX_SPEED = 50000000  # max of the SDM845
+  MAX_SPEED = 8000000  # was 50 MHz (SDM845 max); AGNOS 19.6 corrupts SPI transfers at max clock on mici — 8 MHz probed clean on-car 2026-08-25
 
   def __init__(self, speed=MAX_SPEED):
     assert speed <= self.MAX_SPEED
