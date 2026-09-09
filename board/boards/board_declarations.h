@@ -53,6 +53,7 @@ struct board {
 // load step trips the parked-security "phantom alarm" (voltage-deviation
 // detection). Boards without a SOM never read this; default keeps stock
 // behavior.
+extern bool bootkick_on_power_on;
 bool bootkick_on_power_on = true;
 
 // Bootkick diagnostics: persist kick evidence in TAMP backup registers, which
@@ -62,9 +63,6 @@ bool bootkick_on_power_on = true;
 //   BKP3R last kick reason (1=ignition edge, 2=harness insertion, 3=power-on),
 //   BKP4R kick count, BKP5R uptime_cnt at last kick, BKP6R RSR of kick session.
 #define BOOTKICK_DIAG_MAGIC 0xB007D1A6U
-#ifndef BOOTSTUB
-extern uint32_t uptime_cnt;
-#endif
 static void bootkick_diag_record(uint32_t reason) {
 #ifdef STM32H7
   // self-enable: also reachable on boards that never ran bootkick_diag_init
