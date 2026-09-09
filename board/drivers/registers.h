@@ -55,19 +55,25 @@ void register_clear_bits(volatile uint32_t *addr, uint32_t val) {
 // To be called periodically
 void check_registers(void){
   for(uint16_t i=0U; i<REGISTER_MAP_SIZE; i++){
-    if((uint32_t) register_map[i].address != 0U){
-      ENTER_CRITICAL()
-      if((*(register_map[i].address) & register_map[i].check_mask) != (register_map[i].value & register_map[i].check_mask)){
-        #ifdef DEBUG_FAULTS
-          print("Register at address 0x"); puth((uint32_t) register_map[i].address); print(" is divergent!");
-          print("   Map: 0x"); puth(register_map[i].value);
-          print("   Register: 0x"); puth(*(register_map[i].address));
-          print("   Mask: 0x"); puth(register_map[i].check_mask);
-          print("\n");
-        #endif
-        fault_occurred(FAULT_REGISTER_DIVERGENT);
-      }
-      EXIT_CRITICAL()
+    // SPI completion runs at priority zero, above BASEPRI critical sections.
+    // Snapshot hardware and shadow together, restoring the caller's IRQ mask
+    // before reporting faults. Never mask interrupts across the whole scan.
+    uint32_t saved_primask = __get_PRIMASK();
+    __disable_irq();
+    volatile uint32_t *address = register_map[i].address;
+    uint32_t expected = register_map[i].value;
+    uint32_t mask = register_map[i].check_mask;
+    uint32_t actual = ((uint32_t)address != 0U) ? *address : 0U;
+    __set_PRIMASK(saved_primask);
+    if (((uint32_t)address != 0U) && ((actual & mask) != (expected & mask))) {
+      #ifdef DEBUG_FAULTS
+        print("Register at address 0x"); puth((uint32_t)address); print(" is divergent!\n");
+        print("   Map: 0x"); puth(expected);
+        print("   Register: 0x"); puth(actual);
+        print("   Mask: 0x"); puth(mask);
+        print("\n");
+      #endif
+      fault_occurred(FAULT_REGISTER_DIVERGENT);
     }
   }
 }

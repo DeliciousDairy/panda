@@ -9,7 +9,7 @@ extern uint8_t global_critical_depth;
 
 #ifndef ENTER_CRITICAL
 #define ENTER_CRITICAL()                                      \
-  __set_BASEPRI(1U << (8U - __NVIC_PRIO_BITS));               \
+  __set_BASEPRI(1U << (8U - (uint32_t)__NVIC_PRIO_BITS));               \
   global_critical_depth += 1U;
 #endif
 
