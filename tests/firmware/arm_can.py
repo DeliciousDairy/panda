@@ -22,7 +22,7 @@ class Firmware:
     self.elf = ELFFile(self.file)
     self.symbols = {s.name: s for s in self.elf.get_section_by_name(".symtab").iter_symbols()}
     self.uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
-    for address, length in [(0x08000000, 0x200000), (0x20000000, 0x40000),
+    for address, length in [(0, 0x10000), (0x08000000, 0x200000), (0x20000000, 0x40000),
                             (0x24000000, 0x80000), (0x30000000, 0x80000),
                             (0x38000000, 0x10000), (0x40000000, 0x100000),
                             (0x58000000, 0x100000), (0xE000E000, 0x2000)]:
@@ -42,11 +42,15 @@ class Firmware:
     self.current_masked = 0
     self.max_masked = 0
     self.serial_while_masked = 0
+    self.pending_register_writes = []
+    self.transmissions = []
     self.uc.hook_add(UC_HOOK_CODE, self.code)
     self.uc.hook_add(UC_HOOK_MEM_WRITE, self.nvic_write, begin=0xE000E100, end=0xE000E19F)
     self.uc.hook_add(UC_HOOK_MEM_READ, self.nvic_read, begin=0xE000E100, end=0xE000E19F)
     self.uc.hook_add(UC_HOOK_MEM_READ, self.power_read,
                      begin=self.address("power_save_enabled"), end=self.address("power_save_enabled"))
+    for controller in self.CANS:
+      self.uc.hook_add(UC_HOOK_MEM_WRITE, self.can_write, begin=controller, end=controller + 0x3FF)
     self.write_word(self.address("current_board"), self.address("board_" + board))
     self.uc.mem_write(self.address("harness"), bytes([orientation]))
     self.error_offset, self.health_size = self.member("total_error_cnt")
@@ -70,6 +74,9 @@ class Firmware:
     self.uc.mem_write(address, struct.pack("<I", value))
 
   def code(self, uc, address, size, data):
+    for register, value in self.pending_register_writes:
+      self.write_word(register, value)
+    self.pending_register_writes.clear()
     if uc.reg_read(UC_ARM_REG_PRIMASK):
       self.current_masked += 1
       self.max_masked = max(self.max_masked, self.current_masked)
@@ -83,6 +90,20 @@ class Firmware:
     if address in self.skip:
       self.serial_while_masked += bool(uc.reg_read(UC_ARM_REG_PRIMASK))
       uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
+
+  def can_write(self, uc, access, address, size, value, data):
+    for bus, controller in enumerate(self.CANS):
+      if address == controller + 0x50:  # IR: write-one-to-clear
+        self.pending_register_writes.append((address, self.word(address) & ~value))
+      elif address == controller + 0xA8:  # RXF0A: peripheral acknowledges consumed frame
+        status = self.word(controller + 0xA4)
+        count = status & 0x7F
+        assert count > 0
+        self.write_word(controller + 0xA4, (count - 1) | (((value + 1) % 46) << 8))
+      elif address == controller + 0xD0:  # TXBAR: record the actual transmitted FIFO contents
+        assert value == 1  # configured single-element hardware TX FIFO
+        fifo = 0x4000AC00 + bus * 3384 + 46 * 72
+        self.transmissions.append((bus, bytes(uc.mem_read(fifo, 72))))
 
   def power_read(self, uc, access, address, size, value, data):
     if self.power_interrupt is not None and not uc.reg_read(UC_ARM_REG_PRIMASK):
@@ -149,6 +170,41 @@ class Firmware:
 
   def errors(self, bus):
     return self.word(self.address("can_health") + bus * self.health_size + self.error_offset)
+
+  def health(self, bus, name):
+    offset, size = self.member(name)
+    return self.word(self.address("can_health") + bus * size + offset)
+
+  def deliver_frame(self, bus, address, payload, extended=False, fd=False):
+    """Supply one peripheral FIFO element; execute the unmodified receive/forward/TX path."""
+    dlc = {8: 8, 64: 15}[len(payload)]
+    header = (address if extended else address << 18) | (int(extended) << 30)
+    fifo = 0x4000AC00 + bus * 3384
+    self.uc.mem_write(fifo, struct.pack("<II", header, (dlc << 16) | (int(fd) << 21)) + payload.ljust(64, b"\0"))
+    self.write_word(self.CANS[bus] + 0xA4, 1)  # RXF0S: one element, get index zero
+    self.write_word(self.CANS[bus] + 0x50, 1)  # RF0N
+    if self.irq_enabled(self.IRQS[bus][0]):
+      self.call(f"FDCAN{bus + 1}_IT0_IRQ_Handler")
+
+  def saturate_register_map(self):
+    """Fill every legal shadow slot using actual register_set, one initial hash per slot.
+
+    Addresses are RAM-modeled peripherals, masks zero: no invented control logic.
+    All power-transition GPIO addresses are absent, forcing the existing bounded
+    collision-exhaustion path on every GPIO write, beyond normal boot occupancy.
+    """
+    self.call("init_registers")
+    populated = set()
+    for address in range(0x40000000, 0x40080000, 4):
+      slot = ((address >> 16) ^ (((address + 1) & 0xFFFF) * 23 & 0xFFFF)) & 0x3FF
+      if slot == 1023 or slot in populated:
+        continue
+      self.call("register_set", address, 0, 0)
+      assert self.word(self.address("register_map") + slot * 16) == address
+      populated.add(slot)
+      if len(populated) == 1023:
+        return
+    raise AssertionError("Could not populate every legal register shadow slot")
 
   def deliver_error(self, bus):
     """Model a peripheral protocol error; dispatch only if its NVIC line is enabled."""

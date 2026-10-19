@@ -4,12 +4,13 @@ Build board/obj/panda_h7/main.elf first, or select a retained compiled image wit
 PANDA_ARM_ELF. Missing artifacts/dependencies are errors, never passing skips.
 """
 import os
+import struct
 from pathlib import Path
 
 import pytest
 
 from arm_can import Firmware
-from unicorn.arm_const import UC_ARM_REG_PRIMASK
+from unicorn.arm_const import UC_ARM_REG_PRIMASK, UC_ARM_REG_R0
 
 ROOT = Path(__file__).resolve().parents[2]
 REINITS = ("all", "can0", "can1", "can2", "clear0", "clear1", "clear2")
@@ -133,3 +134,84 @@ def test_masked_hardware_windows_are_bounded_and_exclude_serial(fw):
   instance.call("set_power_save_state", False)
   assert instance.max_masked <= 1024
   assert instance.serial_while_masked == 0
+
+
+def assert_transceivers(instance, orientation, sleeping):
+  if instance.word(instance.address("current_board")) == instance.address("board_cuatro"):
+    pins = ((0x58020400, 7), (0x58020400, 10), (0x58020C00, 8), (0x58020400, 11))
+  else:
+    pins = ((0x58021800, 11), (0x58020400, 3), (0x58020C00, 7), (0x58020400, 4))
+  main = 2 if orientation == 2 else 0
+  for index, (gpio, pin) in enumerate(pins):
+    # Actual board callbacks drive active-low enable pins and configure output mode.
+    assert bool(instance.word(gpio + 0x14) & (1 << pin)) == (sleeping and index != main)
+    assert (instance.word(gpio) >> (2 * pin)) & 3 == 1
+
+
+def test_saturated_register_map_still_completes_power_transaction(fw):
+  instance, orientation = fw
+  instance.saturate_register_map()
+  instance.max_masked = instance.current_masked = 0
+  for sleeping in (True, False, True, False):
+    instance.call("set_power_save_state", sleeping)
+    assert_transceivers(instance, orientation, sleeping)
+    assert instance.can_irqs() == (expected_sleep(orientation) if sleeping else [[True] * 2] * 3)
+    assert instance.uc.reg_read(UC_ARM_REG_PRIMASK) == 0
+  # Explicit pathological bound, separate from the normal-map 1024 instruction
+  # gate. Every GPIO shadow lookup exhausts all 1023 bounded collision attempts.
+  assert instance.max_masked <= 160000
+  assert instance.serial_while_masked == 0
+
+
+@pytest.mark.parametrize("after_wake", [False, True])
+@pytest.mark.parametrize("bus", [0, 1, 2])
+@pytest.mark.parametrize("safety_param", [0, 2], ids=["primary", "secondary"])
+@pytest.mark.parametrize("kind", ["standard", "extended_fd", "actuation"])
+def test_actual_frame_receive_forward_and_tx_before_and_after_wake(fw, after_wake, bus, safety_param, kind):
+  instance, orientation = fw
+  instance.call("can_set_orientation", orientation == 2)
+  extended = fd = kind == "extended_fd"
+  instance.call("set_safety_mode", 33, safety_param)  # actual primary/secondary Rivian hooks
+  if after_wake:
+    for _ in range(3):
+      instance.call("set_power_save_state", True)
+      assert_transceivers(instance, orientation, True)
+      instance.call("set_safety_mode", 19, 0)
+      instance.call("set_power_save_state", False)
+      assert_transceivers(instance, orientation, False)
+    instance.call("set_safety_mode", 33, safety_param)
+  payload = bytes(range(64 if fd else 8))
+  address = 0x110 if kind == "actuation" else (0x123456 if extended else 0x456)
+  instance.deliver_frame(bus, address, payload, extended, fd)
+  assert instance.health(bus, "total_rx_cnt") == 1
+  assert instance.word(instance.address("rx_buffer_overflow")) == 0
+  assert instance.word(instance.address("tx_buffer_overflow")) == 0
+  assert instance.word(instance.address("safety_rx_invalid")) == 0
+  # Both configurations must continue blocking stock steering command 0x110
+  # toward bus0, while forwarding ordinary traffic in the usual directions.
+  logical_bus = 2 - bus if orientation == 2 and bus != 1 else bus
+  destination = None if kind == "actuation" and logical_bus == 2 else {0: 2, 1: None, 2: 0}[bus]
+  assert instance.health(bus, "total_fwd_cnt") == int(destination is not None)
+  if destination is None:
+    assert instance.transmissions == []
+  else:
+    assert instance.health(destination, "total_tx_cnt") == 1
+    assert len(instance.transmissions) == 1
+    actual_bus, fifo = instance.transmissions[0]
+    assert actual_bus == destination
+    header0, header1 = struct.unpack("<II", fifo[:8])
+    assert header0 == (address if extended else address << 18) | (int(extended) << 30)
+    assert header1 == ((15 if fd else 8) << 16) | (int(fd) << 21)
+    assert fifo[8:8 + len(payload)] == payload
+  # The host receives the exact original payload as well as the TX receipt when
+  # forwarded. The actual firmware checksum must validate each queued packet.
+  queue = instance.address("can_rx_q")
+  scratch = 0x2003B000
+  received = []
+  while instance.word(queue) != instance.word(queue + 4):
+    instance.call("can_pop", queue, scratch)
+    instance.call("can_check_checksum", scratch)
+    assert instance.uc.reg_read(UC_ARM_REG_R0) == 1
+    received.append(bytes(instance.uc.mem_read(scratch, 6 + len(payload))))
+  assert len(received) == (2 if destination is not None else 1)
+  assert all(packet[6:] == payload for packet in received)

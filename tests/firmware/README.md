@@ -26,7 +26,21 @@ initializations, actual rate-limited CAN resets, active operation, ignition-chan
 availability, retained diagnostic counters and error reporting after wake.
 Explicit instruction-boundary interruptions cover power requests during CAN init
 and CAN init during a power transition. Tests preserve initial PRIMASK0/1 and bound
-hardware-only masking to1024 instructions; UART output must remain outside it.
+normal-fixture hardware-only masking to1024 instructions; UART output must remain
+outside it. A separate adversarial test fills all1023 legal register-map slots
+through actual register_set calls, forcing every transition GPIO shadow lookup to
+exhaust the existing1023-attempt collision loop. It checks completion, GPIO modes
+and active-low transceiver enables, IRQ policy and mask restoration within a
+separate160000-instruction ceiling. This stress fixture exceeds normal boot-map
+occupancy; neither instruction ceiling is a hardware elapsed-time measurement.
+
+Actual receive IRQs consume modeled standard and extended CAN-FD FIFO elements;
+RX acknowledgments and write-one-to-clear IR registers are modeled. The unchanged
+firmware runs safety hooks, forwarding, software queues, checksums and TX FIFO
+writes. Tests verify payloads and counters for every controller, primary/secondary
+Rivian safety configurations, both orientations and no harness, before and after
+three sleep/noOutput/wake cycles. Stock steering-message forwarding restrictions
+must remain intact, including logical bus remapping with a flipped harness.
 
 This is software regression evidence with simulated peripheral behavior. It does
 not establish electrical bus conditions, physical wake timing, vehicle alarm causes
