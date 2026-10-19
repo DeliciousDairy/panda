@@ -19,10 +19,14 @@ void enable_can_transceivers(bool enabled) {
 }
 
 void set_power_save_state(bool enable) {
-  if (enable != power_save_enabled) {
+  // Keep the policy, CAN IRQs and transceiver state in one transaction. A
+  // priority-zero CAN reinitialization must not see a half-applied transition.
+  // Serial printing stays outside this short hardware-only critical section.
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  const bool state_changed = (enable != power_save_enabled);
+  if (state_changed) {
     if (enable) {
-      print("enable power savings\n");
-
       // Disable CAN interrupts
       if (harness.status == HARNESS_STATUS_FLIPPED) {
         llcan_irq_disable(cans[0]);
@@ -31,8 +35,6 @@ void set_power_save_state(bool enable) {
       }
       llcan_irq_disable(cans[1]);
     } else {
-      print("disable power savings\n");
-
       if (harness.status == HARNESS_STATUS_FLIPPED) {
         llcan_irq_enable(cans[0]);
       } else {
@@ -49,6 +51,10 @@ void set_power_save_state(bool enable) {
     }
 
     power_save_enabled = enable;
+  }
+  __set_PRIMASK(primask);
+  if (state_changed) {
+    print(enable ? "enable power savings\n" : "disable power savings\n");
   }
 }
 

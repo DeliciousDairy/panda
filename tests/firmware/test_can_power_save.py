@@ -9,12 +9,14 @@ from pathlib import Path
 import pytest
 
 from arm_can import Firmware
+from unicorn.arm_const import UC_ARM_REG_PRIMASK
 
 ROOT = Path(__file__).resolve().parents[2]
 REINITS = ("all", "can0", "can1", "can2", "clear0", "clear1", "clear2")
 
 
-@pytest.fixture(params=[("cuatro", 1), ("cuatro", 2), ("red", 1), ("red", 2)], ids=lambda x: f"{x[0]}-orientation{x[1]}")
+@pytest.fixture(params=[(board, orientation) for board in ("cuatro", "red") for orientation in (0, 1, 2)],
+                ids=lambda x: f"{x[0]}-orientation{x[1]}")
 def fw(request):
   path = Path(os.environ.get("PANDA_ARM_ELF", ROOT / "board/obj/panda_h7/main.elf"))
   assert path.is_file(), f"Build the H7 ELF first, or set PANDA_ARM_ELF: {path}"
@@ -26,7 +28,7 @@ def fw(request):
 
 
 def expected_sleep(orientation):
-  return [[orientation == 1] * 2, [False] * 2, [orientation == 2] * 2]
+  return [[orientation != 2] * 2, [False] * 2, [orientation == 2] * 2]
 
 
 def reinit(instance, operation):
@@ -76,8 +78,8 @@ def test_active_reinitialization_keeps_every_channel_receiving(fw, operation):
 
 def test_wake_restores_irqs_and_error_reporting_without_clearing_history(fw):
   instance, orientation = fw
-  main_bus = 0 if orientation == 1 else 2
-  module_bus = 2 if orientation == 1 else 0
+  main_bus = 0 if orientation != 2 else 2
+  module_bus = 2 if orientation != 2 else 0
   instance.deliver_error(module_bus)
   assert instance.errors(module_bus) == 1
   instance.call("set_power_save_state", True)
@@ -91,3 +93,43 @@ def test_wake_restores_irqs_and_error_reporting_without_clearing_history(fw):
   assert instance.can_irqs() == [[True] * 2] * 3
   instance.deliver_error(module_bus)
   assert instance.errors(module_bus) == 2
+
+
+@pytest.mark.parametrize("requested", [False, True])
+@pytest.mark.parametrize("bus", [0, 1, 2])
+def test_power_interrupt_during_reinit_preserves_final_policy(fw, requested, bus):
+  instance, orientation = fw
+  instance.call("set_power_save_state", not requested)
+  instance.reinit_with_power_interrupt(bus, requested)
+  assert instance.can_irqs() == (expected_sleep(orientation) if requested else [[True] * 2] * 3)
+
+
+@pytest.mark.parametrize("initial_mask", [0, 1])
+def test_policy_restores_callers_interrupt_mask(fw, initial_mask):
+  instance, orientation = fw
+  instance.uc.reg_write(UC_ARM_REG_PRIMASK, initial_mask)
+  instance.call("set_power_save_state", True)
+  instance.call("llcan_init", instance.CANS[1])
+  assert instance.uc.reg_read(UC_ARM_REG_PRIMASK) == initial_mask
+  assert instance.can_irqs() == expected_sleep(orientation)
+  instance.call("set_power_save_state", False)
+  assert instance.uc.reg_read(UC_ARM_REG_PRIMASK) == initial_mask
+  assert instance.can_irqs() == [[True] * 2] * 3
+
+
+@pytest.mark.parametrize("requested", [False, True])
+def test_reinit_interrupt_during_power_transition_preserves_final_policy(fw, requested):
+  instance, orientation = fw
+  module_bus = 0 if orientation == 2 else 2
+  instance.call("set_power_save_state", not requested)
+  instance.power_with_reinit_interrupt(requested, module_bus)
+  assert instance.can_irqs() == (expected_sleep(orientation) if requested else [[True] * 2] * 3)
+
+
+def test_masked_hardware_windows_are_bounded_and_exclude_serial(fw):
+  instance, _ = fw
+  instance.call("set_power_save_state", True)
+  instance.call("can_init_all")
+  instance.call("set_power_save_state", False)
+  assert instance.max_masked <= 1024
+  assert instance.serial_while_masked == 0

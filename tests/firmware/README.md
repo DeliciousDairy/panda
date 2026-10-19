@@ -21,9 +21,12 @@ names are not importable Python package names. Missing ELF/dependencies are erro
 not skips. The default ELF is this checkout's board/obj/panda_h7/main.elf.
 
 Coverage includes both actual red/cuatro board function tables and both harness
-orientations: power-save entry, repeated noOutput transitions, individual/all CAN
+orientations plus no harness: power-save entry, repeated noOutput transitions, individual/all CAN
 initializations, actual rate-limited CAN resets, active operation, ignition-channel
 availability, retained diagnostic counters and error reporting after wake.
+Explicit instruction-boundary interruptions cover power requests during CAN init
+and CAN init during a power transition. Tests preserve initial PRIMASK0/1 and bound
+hardware-only masking to1024 instructions; UART output must remain outside it.
 
 This is software regression evidence with simulated peripheral behavior. It does
 not establish electrical bus conditions, physical wake timing, vehicle alarm causes

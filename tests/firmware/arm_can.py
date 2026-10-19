@@ -9,7 +9,7 @@ from pathlib import Path
 
 from elftools.elf.elffile import ELFFile
 from unicorn import Uc, UC_ARCH_ARM, UC_MODE_MCLASS, UC_MODE_THUMB, UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE
-from unicorn.arm_const import UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2
+from unicorn.arm_const import UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_PRIMASK
 
 
 class Firmware:
@@ -35,9 +35,18 @@ class Firmware:
     self.uc.mem_write(self.address("interrupts_enabled"), b"\x01")
     self.skip = {self.address(n) & ~1 for n in ("print", "puth")}
     self.enabled = [0] * 8
+    self.power_interrupt = None
+    self.can_interrupt = None
+    self.break_next = False
+    self.break_address = None
+    self.current_masked = 0
+    self.max_masked = 0
+    self.serial_while_masked = 0
     self.uc.hook_add(UC_HOOK_CODE, self.code)
     self.uc.hook_add(UC_HOOK_MEM_WRITE, self.nvic_write, begin=0xE000E100, end=0xE000E19F)
     self.uc.hook_add(UC_HOOK_MEM_READ, self.nvic_read, begin=0xE000E100, end=0xE000E19F)
+    self.uc.hook_add(UC_HOOK_MEM_READ, self.power_read,
+                     begin=self.address("power_save_enabled"), end=self.address("power_save_enabled"))
     self.write_word(self.address("current_board"), self.address("board_" + board))
     self.uc.mem_write(self.address("harness"), bytes([orientation]))
     self.error_offset, self.health_size = self.member("total_error_cnt")
@@ -61,14 +70,31 @@ class Firmware:
     self.uc.mem_write(address, struct.pack("<I", value))
 
   def code(self, uc, address, size, data):
+    if uc.reg_read(UC_ARM_REG_PRIMASK):
+      self.current_masked += 1
+      self.max_masked = max(self.max_masked, self.current_masked)
+    else:
+      self.current_masked = 0
+    if self.break_next:
+      self.break_next = False
+      self.break_address = address
+      uc.emu_stop()
+      return
     if address in self.skip:
+      self.serial_while_masked += bool(uc.reg_read(UC_ARM_REG_PRIMASK))
       uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
+
+  def power_read(self, uc, access, address, size, value, data):
+    if self.power_interrupt is not None and not uc.reg_read(UC_ARM_REG_PRIMASK):
+      self.break_next = True
 
   def nvic_write(self, uc, access, address, size, value, data):
     if 0xE000E100 <= address < 0xE000E120:
       self.enabled[(address - 0xE000E100) // 4] |= value
     elif 0xE000E180 <= address < 0xE000E1A0:
       self.enabled[(address - 0xE000E180) // 4] &= ~value
+    if self.can_interrupt is not None and not uc.reg_read(UC_ARM_REG_PRIMASK):
+      self.break_next = True
 
   def nvic_read(self, uc, access, address, size, value, data):
     if 0xE000E100 <= address < 0xE000E120:
@@ -81,8 +107,39 @@ class Firmware:
       self.uc.reg_write(register, value)
     self.uc.reg_write(UC_ARM_REG_LR, self.STOP | 1)
     self.uc.emu_start(self.address(name) | 1, self.STOP, count=300000)
+    if self.break_address is not None:
+      boundary = self.break_address
+      self.break_address = None
+      requested = self.power_interrupt
+      can_bus = self.can_interrupt
+      self.power_interrupt = None
+      self.can_interrupt = None
+      context = self.uc.context_save()
+      self.uc.reg_write(UC_ARM_REG_SP, 0x2003D000)
+      if can_bus is None:
+        self.call("set_power_save_state", requested)
+      else:
+        self.call("llcan_init", self.CANS[can_bus])
+      self.uc.context_restore(context)
+      self.uc.emu_start(boundary | 1, self.STOP, count=300000)
     if self.uc.reg_read(UC_ARM_REG_PC) != self.STOP:
       raise RuntimeError(f"Instruction limit before {name} returned")
+
+  def reinit_with_power_interrupt(self, bus, requested):
+    self.power_interrupt = requested
+    self.call("llcan_init", self.CANS[bus])
+    if self.power_interrupt is not None:
+      # Masked decision defers delivery until return. An older ELF without the
+      # power-state read also receives the interrupt after its call returns.
+      self.power_interrupt = None
+      self.call("set_power_save_state", requested)
+
+  def power_with_reinit_interrupt(self, requested, bus):
+    self.can_interrupt = bus
+    self.call("set_power_save_state", requested)
+    if self.can_interrupt is not None:
+      self.can_interrupt = None
+      self.call("llcan_init", self.CANS[bus])
 
   def irq_enabled(self, irq):
     return bool(self.enabled[irq // 32] & (1 << (irq % 32)))

@@ -210,7 +210,24 @@ bool llcan_init(FDCAN_GlobalTypeDef *FDCANx) {
       print(CAN_NAME_FROM_CANIF(FDCANx)); print(" llcan_init timed out (2)!\n");
     }
 
-    llcan_irq_enable(FDCANx);
+    #if !defined(PANDA_JUNGLE) && !defined(PANDA_BODY)
+      // Safety changes and CAN recovery can reinitialize a controller after
+      // power saving disabled its transceiver. Preserve that IRQ mask while
+      // keeping the ignition-detection CAN live, including a flipped harness.
+      // A priority-zero power-state change must not invalidate this decision
+      // between reading the policy and applying the NVIC mask.
+      const uint32_t primask = __get_PRIMASK();
+      __disable_irq();
+      const FDCAN_GlobalTypeDef *ignition_can_controller = (harness.status == HARNESS_STATUS_FLIPPED) ? FDCAN3 : FDCAN1;
+      if (power_save_enabled && (FDCANx != ignition_can_controller)) {
+        llcan_irq_disable(FDCANx);
+      } else {
+        llcan_irq_enable(FDCANx);
+      }
+      __set_PRIMASK(primask);
+    #else
+      llcan_irq_enable(FDCANx);
+    #endif
 
   } else {
     print(CAN_NAME_FROM_CANIF(FDCANx)); print(" llcan_init timed out (1)!\n");
