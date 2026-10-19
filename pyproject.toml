@@ -22,6 +22,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "unicorn >= 2.1.4",
+  "pyelftools >= 0.33",
   "scons",
   "pycryptodome >= 3.9.8",
   "cffi",
