@@ -25,7 +25,10 @@ void set_power_save_state(bool enable) {
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   const bool state_changed = (enable != power_save_enabled);
-  if (state_changed) {
+  // A harness refresh can change the ignition transceiver while already asleep.
+  // Reapply that policy for repeated sleep requests; equal awake requests retain
+  // their existing no-op behavior, including the current mux selection.
+  if (state_changed || enable) {
     if (enable) {
       // Disable CAN interrupts
       if (harness.status == HARNESS_STATUS_FLIPPED) {

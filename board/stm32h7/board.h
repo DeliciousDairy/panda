@@ -3,6 +3,7 @@
 // ///////////////////////////////////////////////////////////// //
 #include "board/boards/board_declarations.h"
 #include "board/boards/unused_funcs.h"
+#include "board/boards/can_mode.h"
 
 // ///// Board definition and detection ///// //
 #include "board/stm32h7/lladc.h"

@@ -56,8 +56,8 @@ static void tres_enable_can_transceiver(uint8_t transceiver, bool enabled) {
 }
 
 static void tres_set_can_mode(uint8_t mode) {
-  current_board->enable_can_transceiver(2U, false);
-  current_board->enable_can_transceiver(4U, false);
+  set_can_mode_transceiver(2U, false);
+  set_can_mode_transceiver(4U, false);
   switch (mode) {
     case CAN_MODE_NORMAL:
     case CAN_MODE_OBD_CAN2:
@@ -75,7 +75,7 @@ static void tres_set_can_mode(uint8_t mode) {
 
         set_gpio_pullup(GPIOB, 6, PULL_NONE);
         set_gpio_alternate(GPIOB, 6, GPIO_AF9_FDCAN2);
-        current_board->enable_can_transceiver(2U, true);
+        set_can_mode_transceiver(2U, true);
       } else {
         // B5,B6: disable normal mode
         set_gpio_pullup(GPIOB, 5, PULL_NONE);
@@ -89,7 +89,7 @@ static void tres_set_can_mode(uint8_t mode) {
 
         set_gpio_pullup(GPIOB, 13, PULL_NONE);
         set_gpio_alternate(GPIOB, 13, GPIO_AF9_FDCAN2);
-        current_board->enable_can_transceiver(4U, true);
+        set_can_mode_transceiver(4U, true);
       }
       break;
     default:
