@@ -4,6 +4,7 @@ The loader/call boundary reuses the retained Codex panda_register_probe design.
 Only serial output and external peripheral behavior are substituted. This is not
 electrical CAN, wake-edge, interrupt-latency or vehicle validation.
 """
+import hashlib
 import struct
 from pathlib import Path
 
@@ -16,11 +17,21 @@ class Firmware:
   STOP = 0x08001000
   CANS = (0x4000A000, 0x4000A400, 0x4000D400)
   IRQS = ((19, 21), (20, 22), (159, 160))
+  # Cache only immutable ELF metadata, keyed by actual image bytes. Every
+  # interruption case still gets a new CPU and freshly loaded RAM/peripherals.
+  SYMBOL_CACHE = {}
+  MEMBER_CACHE = {}
 
   def __init__(self, path, board="cuatro", orientation=1):
+    self.image_sha256 = hashlib.sha256(Path(path).read_bytes()).hexdigest()
     self.file = Path(path).open("rb")
     self.elf = ELFFile(self.file)
-    self.symbols = {s.name: s for s in self.elf.get_section_by_name(".symtab").iter_symbols()}
+    if self.image_sha256 not in self.SYMBOL_CACHE:
+      self.SYMBOL_CACHE[self.image_sha256] = {
+        s.name: {key: s[key] for key in ("st_value", "st_size")}
+        for s in self.elf.get_section_by_name(".symtab").iter_symbols()
+      }
+    self.symbols = self.SYMBOL_CACHE[self.image_sha256]
     self.uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
     for address, length in [(0, 0x10000), (0x08000000, 0x200000), (0x20000000, 0x40000),
                             (0x24000000, 0x80000), (0x30000000, 0x80000),
@@ -60,11 +71,16 @@ class Firmware:
     return self.symbols[name]["st_value"]
 
   def member(self, name):
+    key = (self.image_sha256, name)
+    if key in self.MEMBER_CACHE:
+      return self.MEMBER_CACHE[key]
     for unit in self.elf.get_dwarf_info().iter_CUs():
       for die in unit.iter_DIEs():
         attribute = die.attributes.get("DW_AT_name")
         if die.tag == "DW_TAG_member" and attribute and attribute.value == name.encode():
-          return die.attributes["DW_AT_data_member_location"].value, die.get_parent().attributes["DW_AT_byte_size"].value
+          value = die.attributes["DW_AT_data_member_location"].value, die.get_parent().attributes["DW_AT_byte_size"].value
+          self.MEMBER_CACHE[key] = value
+          return value
     raise ValueError(f"No compiled member information for {name}")
 
   def word(self, address):
