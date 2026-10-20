@@ -215,3 +215,127 @@ def test_actual_frame_receive_forward_and_tx_before_and_after_wake(fw, after_wak
     received.append(bytes(instance.uc.mem_read(scratch, 6 + len(payload))))
   assert len(received) == (2 if destination is not None else 1)
   assert all(packet[6:] == payload for packet in received)
+
+
+# The original IRQ-only repair left the mux/transceiver path untested after a
+# sleeping safety switch. These cases execute the real board and control paths.
+MUX_BOARDS = [(board, orientation) for board in ("red", "cuatro", "tres") for orientation in (0, 1, 2)]
+
+
+def mux_firmware(board, orientation, sleeping):
+  path = Path(os.environ.get("PANDA_ARM_ELF", ROOT / "board/obj/panda_h7/main.elf"))
+  instance = Firmware(path, board=board, orientation=orientation)
+  instance.call("can_set_orientation", orientation == 2)
+  instance.call("can_init_all")
+  instance.call("set_safety_mode", 19, 0)
+  instance.call("set_power_save_state", True)
+  if not sleeping:
+    instance.call("set_power_save_state", False)
+  return instance
+
+
+def mux_pins(instance):
+  board = instance.word(instance.address("current_board"))
+  if board == instance.address("board_red"):
+    return ((0x58020400, 3), (0x58020400, 4))
+  return ((0x58020400, 10), (0x58020400, 11))
+
+
+def assert_mux(instance, orientation, mode, sleeping):
+  enabled = [not bool(instance.word(gpio + 0x14) & (1 << pin)) for gpio, pin in mux_pins(instance)]
+  selected = int((mode == 0) == (orientation == 2))
+  assert enabled[selected] == (not sleeping)
+  if sleeping:
+    assert enabled == [False, False]
+  # The ignition path stays available. Tres physically ties its two enables.
+  board = instance.word(instance.address("current_board"))
+  if board == instance.address("board_cuatro"):
+    gpio, pin = ((0x58020C00, 8) if orientation == 2 else (0x58020400, 7))
+  else:
+    gpio, pin = ((0x58020C00, 7) if orientation == 2 else (0x58021800, 11))
+  assert not instance.word(gpio + 0x14) & (1 << pin)
+  assert instance.can_irqs() == (expected_sleep(orientation) if sleeping else [[True] * 2] * 3)
+
+
+def control(instance, request, param1=0, param2=0):
+  pointer = 0x2003B000
+  instance.uc.mem_write(pointer, struct.pack("<BHHH", request, param1, param2, 0))
+  instance.call("comms_control_handler", pointer, pointer + 32)
+
+
+@pytest.mark.parametrize("board,orientation", MUX_BOARDS)
+@pytest.mark.parametrize("mode,param", [(0, 0), (19, 0), (3, 0), (3, 1), (33, 0), (33, 2)])
+def test_sleeping_safety_switch_preserves_transceivers(board, orientation, mode, param):
+  instance = mux_firmware(board, orientation, True)
+  try:
+    for _ in range(3):
+      control(instance, 0xDC, mode, param)
+      assert_mux(instance, orientation, int(mode == 3 and param == 0), True)
+      control(instance, 0xE7, 1)  # repeated power-save request must be harmless
+      assert_mux(instance, orientation, int(mode == 3 and param == 0), True)
+  finally:
+    instance.close()
+
+
+@pytest.mark.parametrize("board,orientation", MUX_BOARDS)
+@pytest.mark.parametrize("mode", [0, 1])
+@pytest.mark.parametrize("sleeping", [False, True])
+@pytest.mark.parametrize("initial_mask", [0, 1])
+def test_direct_mux_honors_power_policy_and_callers_mask(board, orientation, mode, sleeping, initial_mask):
+  instance = mux_firmware(board, orientation, sleeping)
+  try:
+    instance.uc.reg_write(UC_ARM_REG_PRIMASK, initial_mask)
+    control(instance, 0xDB, mode)
+    assert_mux(instance, orientation, mode, sleeping)
+    assert instance.uc.reg_read(UC_ARM_REG_PRIMASK) == initial_mask
+    assert instance.max_masked <= 1024 if not initial_mask else True
+    assert instance.serial_while_masked == 0
+  finally:
+    instance.close()
+
+
+@pytest.mark.parametrize("board,orientation", MUX_BOARDS)
+@pytest.mark.parametrize("initial_mode,initial_power", [(0, False), (0, True), (33, False)])
+def test_actual_host_parked_command_sequence_then_ignition_wake(board, orientation, initial_mode, initial_power):
+  instance = mux_firmware(board, orientation, initial_power)
+  try:
+    instance.call("set_safety_mode", initial_mode, 0)
+    # This ordering is emitted by the complete actual host function retained in
+    # the separate host-policy probe; it is not a replica of the host decision logic.
+    if initial_mode == 0:
+      control(instance, 0xDC, 19)
+    if not initial_power:
+      control(instance, 0xE7, 1)
+    control(instance, 0xDC, 19)
+    assert_mux(instance, orientation, 0, True)
+    for counter in (0, 1):
+      instance.deliver_frame(2 if orientation == 2 else 0, 0x152,
+                             bytes([0, counter, 0, 0, 0, 0, 0, 0x10]))
+    assert instance.uc.mem_read(instance.address("ignition_can"), 1) == b"\x01"
+    control(instance, 0xE7, 0)
+    assert_mux(instance, orientation, 0, False)
+    instance.call("set_safety_mode", 33, 0)
+    assert_mux(instance, orientation, 0, False)
+  finally:
+    instance.close()
+
+
+@pytest.mark.parametrize("board,orientation", MUX_BOARDS)
+@pytest.mark.parametrize("mode", [0, 1])
+@pytest.mark.parametrize("requested", [False, True])
+def test_power_request_interrupting_mux_cannot_reenable_sleeping_transceiver(board, orientation, mode, requested):
+  name = "red_set_can_mode" if board == "red" else "tres_set_can_mode"
+  trace = mux_firmware(board, orientation, not requested)
+  try:
+    boundaries = trace.policy_boundaries(name, mode)
+  finally:
+    trace.close()
+  for boundary in boundaries:
+    instance = mux_firmware(board, orientation, not requested)
+    try:
+      instance.call_with_interrupt(name, (mode,), "set_power_save_state", (requested,), boundary)
+      assert_mux(instance, orientation, mode, requested)
+      assert instance.uc.reg_read(UC_ARM_REG_PRIMASK) == 0
+      assert instance.serial_while_masked == 0
+    finally:
+      instance.close()

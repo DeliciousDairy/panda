@@ -165,6 +165,57 @@ class Firmware:
   def irq_enabled(self, irq):
     return bool(self.enabled[irq // 32] & (1 << (irq % 32)))
 
+  def policy_boundaries(self, name, *args):
+    """Instruction boundaries around actual policy reads and GPIO writes."""
+    index = [-1]
+    boundaries = {0}
+    def code(uc, address, size, data):
+      index[0] += 1
+    def memory(uc, access, address, size, value, data):
+      boundaries.update((index[0], index[0] + 1))
+    hooks = [self.uc.hook_add(UC_HOOK_CODE, code),
+             self.uc.hook_add(UC_HOOK_MEM_READ, memory, begin=self.address("power_save_enabled"),
+                              end=self.address("power_save_enabled")),
+             self.uc.hook_add(UC_HOOK_MEM_WRITE, memory, begin=0x58020000, end=0x58021FFF)]
+    try:
+      self.call(name, *args)
+    finally:
+      for hook in hooks:
+        self.uc.hook_del(hook)
+    boundaries.add(index[0])
+    return sorted(boundaries)
+
+  def call_with_interrupt(self, name, args, interrupt, interrupt_args, boundary):
+    """Deliver one explicit higher-priority request, respecting actual PRIMASK."""
+    index = [-1]
+    paused = [None]
+    delivered = [False]
+    def code(uc, address, size, data):
+      index[0] += 1
+      if index[0] >= boundary and not delivered[0] and not uc.reg_read(UC_ARM_REG_PRIMASK):
+        paused[0] = address
+        uc.emu_stop()
+    for register, value in zip((UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2), args):
+      self.uc.reg_write(register, value)
+    self.uc.reg_write(UC_ARM_REG_LR, self.STOP | 1)
+    hook = self.uc.hook_add(UC_HOOK_CODE, code)
+    try:
+      self.uc.emu_start(self.address(name) | 1, self.STOP, count=300000)
+      delivered[0] = True
+      if paused[0] is not None:
+        context = self.uc.context_save()
+        self.uc.reg_write(UC_ARM_REG_SP, 0x2003D000)
+        self.call(interrupt, *interrupt_args)
+        self.uc.context_restore(context)
+        self.uc.emu_start(paused[0] | 1, self.STOP, count=300000)
+      else:
+        # An initially masked caller defers the request through function return.
+        assert self.uc.reg_read(UC_ARM_REG_PC) == self.STOP
+        self.call(interrupt, *interrupt_args)
+      assert self.uc.reg_read(UC_ARM_REG_PC) == self.STOP
+    finally:
+      self.uc.hook_del(hook)
+
   def can_irqs(self):
     return [[self.irq_enabled(irq) for irq in pair] for pair in self.IRQS]
 
