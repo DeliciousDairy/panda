@@ -176,6 +176,7 @@ class Firmware:
     hooks = [self.uc.hook_add(UC_HOOK_CODE, code),
              self.uc.hook_add(UC_HOOK_MEM_READ, memory, begin=self.address("power_save_enabled"),
                               end=self.address("power_save_enabled")),
+             self.uc.hook_add(UC_HOOK_MEM_READ, memory, begin=0x58020000, end=0x58021FFF),
              self.uc.hook_add(UC_HOOK_MEM_WRITE, memory, begin=0x58020000, end=0x58021FFF)]
     try:
       self.call(name, *args)

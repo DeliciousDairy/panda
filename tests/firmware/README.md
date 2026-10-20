@@ -45,3 +45,17 @@ must remain intact, including logical bus remapping with a flipped harness.
 This is software regression evidence with simulated peripheral behavior. It does
 not establish electrical bus conditions, physical wake timing, vehicle alarm causes
 or the absence of error accumulation on the vehicle.
+
+The transceiver extension covers actual red/cuatro/tres mode callbacks and USB/SPI
+control requests, both mux selections, safety modes SILENT/NOOUTPUT/ELM327/Rivian,
+repeated sleep requests and the host's recorded parked command ordering. GPIO
+write observation rejects even a transient active-low enable pulse while asleep.
+Actual Drive_On frames must still wake the receiver and normal active CAN policy.
+Harness refresh uses the existing tick handler's sequence and checks the newly
+selected ignition transceiver. Explicit higher-priority requests are injected at
+instruction boundaries around actual policy and GPIO reads/writes in both
+mux-versus-power directions. Both caller masks are preserved; added mux critical
+sections retain the normal1024/saturated160000 instruction ceilings. Tres's
+physically tied main CAN enables are modeled through its actual callbacks.
+The full-call instruction guard is2000000 to allow the existing saturated register
+map's unmasked mux setup; the stricter masked-window guards are unchanged.

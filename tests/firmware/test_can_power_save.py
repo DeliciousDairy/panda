@@ -255,6 +255,14 @@ def assert_mux(instance, orientation, mode, sleeping):
   else:
     gpio, pin = ((0x58020C00, 7) if orientation == 2 else (0x58021800, 11))
   assert not instance.word(gpio + 0x14) & (1 << pin)
+  if not sleeping:
+    # Neither main nor module transceiver may be lost to a stale shared-port
+    # GPIO read/modify/write when power wake interrupts mux configuration.
+    if board == instance.address("board_cuatro"):
+      pins = ((0x58020400, 7), (0x58020C00, 8))
+    else:
+      pins = ((0x58021800, 11), (0x58020C00, 7))
+    assert all(not instance.word(gpio + 0x14) & (1 << pin) for gpio, pin in pins)
   assert instance.can_irqs() == (expected_sleep(orientation) if sleeping else [[True] * 2] * 3)
 
 
