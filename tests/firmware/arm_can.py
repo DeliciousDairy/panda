@@ -127,7 +127,7 @@ class Firmware:
     for register, value in zip((UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2), args):
       self.uc.reg_write(register, value)
     self.uc.reg_write(UC_ARM_REG_LR, self.STOP | 1)
-    self.uc.emu_start(self.address(name) | 1, self.STOP, count=300000)
+    self.uc.emu_start(self.address(name) | 1, self.STOP, count=2000000)
     if self.break_address is not None:
       boundary = self.break_address
       self.break_address = None

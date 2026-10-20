@@ -8,6 +8,7 @@ import struct
 from pathlib import Path
 
 import pytest
+from unicorn import UC_HOOK_MEM_WRITE
 
 from arm_can import Firmware
 from unicorn.arm_const import UC_ARM_REG_PRIMASK, UC_ARM_REG_R0
@@ -285,10 +286,12 @@ def test_direct_mux_honors_power_policy_and_callers_mask(board, orientation, mod
   instance = mux_firmware(board, orientation, sleeping)
   try:
     instance.uc.reg_write(UC_ARM_REG_PRIMASK, initial_mask)
+    instance.max_masked = instance.current_masked = 0
     control(instance, 0xDB, mode)
     assert_mux(instance, orientation, mode, sleeping)
     assert instance.uc.reg_read(UC_ARM_REG_PRIMASK) == initial_mask
-    assert instance.max_masked <= 1024 if not initial_mask else True
+    if not initial_mask:
+      assert instance.max_masked <= 1024
     assert instance.serial_while_masked == 0
   finally:
     instance.close()
@@ -339,3 +342,77 @@ def test_power_request_interrupting_mux_cannot_reenable_sleeping_transceiver(boa
       assert instance.serial_while_masked == 0
     finally:
       instance.close()
+
+
+@pytest.mark.parametrize("board,orientation", MUX_BOARDS)
+@pytest.mark.parametrize("mode", [0, 1])
+def test_sleeping_mux_never_pulses_either_transceiver_enable(board, orientation, mode):
+  instance = mux_firmware(board, orientation, True)
+  writes = []
+  def observe(uc, access, address, size, value, data):
+    for gpio, pin in mux_pins(instance):
+      if address == gpio + 0x14:
+        writes.append(bool(value & (1 << pin)))
+  hook = instance.uc.hook_add(UC_HOOK_MEM_WRITE, observe, begin=0x58020000, end=0x58021FFF)
+  try:
+    control(instance, 0xDB, mode)
+    assert writes and all(writes)  # active-low: every observed write leaves both disabled
+    assert_mux(instance, orientation, mode, True)
+  finally:
+    instance.uc.hook_del(hook)
+    instance.close()
+
+
+@pytest.mark.parametrize("board,orientation", MUX_BOARDS)
+@pytest.mark.parametrize("requested", [False, True])
+@pytest.mark.parametrize("mode", [0, 1])
+def test_mux_interrupting_power_request_preserves_final_policy(board, orientation, requested, mode):
+  name = "red_set_can_mode" if board == "red" else "tres_set_can_mode"
+  trace = mux_firmware(board, orientation, not requested)
+  try:
+    boundaries = trace.policy_boundaries("set_power_save_state", requested)
+  finally:
+    trace.close()
+  for boundary in boundaries:
+    instance = mux_firmware(board, orientation, not requested)
+    try:
+      instance.call_with_interrupt("set_power_save_state", (requested,), name, (mode,), boundary)
+      assert_mux(instance, orientation, mode, requested)
+      assert instance.uc.reg_read(UC_ARM_REG_PRIMASK) == 0
+      assert instance.serial_while_masked == 0
+    finally:
+      instance.close()
+
+
+@pytest.mark.parametrize("board,orientation", MUX_BOARDS)
+@pytest.mark.parametrize("new_orientation", [0, 1, 2])
+def test_sleeping_harness_refresh_reapplies_ignition_transceiver(board, orientation, new_orientation):
+  instance = mux_firmware(board, orientation, True)
+  try:
+    instance.uc.mem_write(instance.address("harness"), bytes([new_orientation]))
+    instance.call("can_set_orientation", new_orientation == 2)
+    instance.call("can_init_all")
+    instance.call("set_safety_mode", 19, 0)
+    instance.call("set_power_save_state", True)  # existing tick_handler refresh sequence
+    assert_mux(instance, new_orientation, 0, True)
+    if board != "tres":
+      assert_transceivers(instance, new_orientation, True)
+  finally:
+    instance.close()
+
+
+@pytest.mark.parametrize("board,orientation", MUX_BOARDS)
+@pytest.mark.parametrize("sleeping", [False, True])
+def test_saturated_map_mux_switch_preserves_policy_without_unbounded_masking(board, orientation, sleeping):
+  instance = mux_firmware(board, orientation, sleeping)
+  try:
+    instance.saturate_register_map()
+    instance.max_masked = instance.current_masked = 0
+    for mode in (0, 1, 0):
+      control(instance, 0xDB, mode)
+      assert_mux(instance, orientation, mode, sleeping)
+    assert instance.max_masked <= 160000
+    assert instance.serial_while_masked == 0
+    assert instance.uc.reg_read(UC_ARM_REG_PRIMASK) == 0
+  finally:
+    instance.close()
